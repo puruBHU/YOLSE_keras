@@ -14,33 +14,45 @@ Description:
         2. random vertical flip
 """
 
+# Standard library import
+import cv2
 import pandas as pd
 import numpy as np
-
 from pathlib import Path
 from skimage.io import imread
-import cv2
 
+# Keras library import
 from tensorflow.keras import backend as K
 from keras.utils import Sequence, to_categorical
 
-def Gauss2D(shape=(3,3),sigma=0.5):
-    """
-    2D gaussian mask - should give the same result as MATLAB's
-    fspecial('gaussian',[shape],[sigma])
-    """
-    m,n = [(ss-1.)/2. for ss in shape]
-    y,x = np.ogrid[-m:m+1,-n:n+1]
-    h = np.exp( -(x*x + y*y) / (2.*sigma*sigma) )
-    h[ h < np.finfo(h.dtype).eps*h.max() ] = 0
-    sumh = h.sum()
-    if sumh != 0:
-        h /= sumh
-    return h
 
+def Gauss2D(sigma = 1.5, coordinate = None):
+    x,y  = coordinate
+    
+    j,i  = np.ogrid[0:64,0:64]
+    
+    a    = (2 * np.square(sigma))
+    
+    b    = 1.0 / (a * np.pi)
+    
+    gaussian = np.exp( - (np.square(i - x) + np.square(j - y)) / a)
+    return gaussian
 
+def CropImage(image = None, bndbox=None):
+    
+    h, w = image.shape[:2]
+    
+    xtop = np.int16(w * bndbox[0])
+    ytop = np.int16(h * bndbox[1])
+    
+    xbot = np.int16(w * bndbox[2])
+    ybot = np.int16(h * bndbox[3])
+    
+    cropped_image  = image[ytop:ybot, xtop:xbot,:]
+    
+    return cropped_image
 
-def load_image(path, target_size = (128,128)):
+def load_image(path = None, target_size = (128,128), bndbox = None):
     """Load an image as an numpy array
     
     Arguments:
@@ -54,6 +66,9 @@ def load_image(path, target_size = (128,128)):
         target_size = target_size
             
     image = imread(path)
+    
+    # Crop the hand area from the whole image
+    image = CropImage(image  = image, bndbox = bndbox)
     # resize the image
     if target_size:
         image = cv2.resize(image, (target_size[0], target_size[1]), 
@@ -88,25 +103,16 @@ def encoder(gt):
     non_zero_index = np.nonzero(gt[:,0])[0]
     
     fingermap = np.zeros(shape=(64,64,5),dtype=np.float32)
+    h, w      = fingermap.shape[:2]
     
     for i in non_zero_index:
         x, y = gt[i]
+   
         
-        x = np.int16(64 * x)
-        y = np.int16(64 * y)
-#        print(x.shape)
+        x = w * x
+        y = h * y
         
-        # limit the top coordinate 
-        xtop = np.maximum(0, int(x - 3))
-        ytop = np.maximum(0, int(y - 3))
-        
-       
-        # if xtop or ytop >  124
-        xtop = np.minimum(xtop, 59)
-        ytop = np.minimum(ytop, 59)
-       
-    
-        fingermap[ytop : (ytop + 5), xtop :( xtop + 5), i] =  np.ones(shape=(5,5), dtype=np.float32)
+        fingermap[:,:,i] = Gauss2D(coordinate = (x,y))
 
     return fingermap
 
@@ -308,28 +314,30 @@ class Dataloader(Sequence):
         else:
             current_batch_size = n - self.batch_size
         
-        image_batch = self.f.iloc[idx * current_batch_size : (idx + 1) * current_batch_size, 0].values
-        
-        label_batch = self.f.iloc[idx * current_batch_size : (idx + 1) * current_batch_size, 7:].values
+        image_batch  = self.f.iloc[idx * current_batch_size : (idx + 1) * current_batch_size, 0].values
+        bndbox_batch = self.f.iloc[idx * current_batch_size : (idx + 1) * current_batch_size, 1:5].values
+        label_batch  = self.f.iloc[idx * current_batch_size : (idx + 1) * current_batch_size, 11:].values
         
         batch_x = []
         batch_y = []
+
             
         for m, files in enumerate(image_batch):
             
-            image_name = files.split('/')[-1]
             # The full path of the image
-            image_path = self.root/'resized_224x224'/image_name
+            image_path = self.root/files
+            bndbox     = bndbox_batch[m]
             
-            x = load_image(image_path, target_size = self.target_size)
+            x = load_image(path = image_path, target_size = self.target_size, bndbox = bndbox)
             
             # Normalize the image
             x = self.image_data_generator.standardize(x)
+           
             ground_truth = PreProcessGT(label_batch[m])
             
+            # Data Augmentation
             x, ground_truth = self.image_data_generator.random_transforms((x, ground_truth))
             
-            ground_truth = PreProcessGT(gt =  label_batch[m])
             ground_truth = encoder(gt = ground_truth)
             
             x = np.array(x, dtype=np.float32)
@@ -337,9 +345,13 @@ class Dataloader(Sequence):
             
             batch_x.append(x)
             batch_y.append(y)
+         
             
+            # print(y.shape)
+            
+        
         batch_x = np.array(batch_x, dtype = np.float32)
-        batch_y = np.array(batch_y, dtype = np.float32)
+        batch_y = np.asarray(batch_y)
             
         return batch_x, batch_y
     
